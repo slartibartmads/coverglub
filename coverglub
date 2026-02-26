@@ -33,14 +33,14 @@ def run(cmd):
 
 
 def playerctl(*args):
-    return run(["playerctl", "-p", "spotify", *args])
+    return run(["playerctl", *args])
 
 
-class SpotifyRemote(Gtk.ApplicationWindow):
+class CoverglubWindow(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
 
-        self.set_title("spotify-remote")
+        self.set_title("coverglub")
         self._size_index = 1  # Start at 350
         self.set_default_size(WINDOW_SIZES[self._size_index], WINDOW_SIZES[self._size_index])
         self.set_resizable(False)
@@ -322,15 +322,15 @@ class SpotifyRemote(Gtk.ApplicationWindow):
         GLib.timeout_add(POLL_INTERVAL_MS, self._update)
 
 
-class SpotifyApp(Gtk.Application):
+class CoverglubApp(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="no.mads.spotify-remote")
+        super().__init__(application_id="io.github.coverglub")
 
     def do_activate(self):
-        win = SpotifyRemote(self)
+        win = CoverglubWindow(self)
         win.present()
 
 
 if __name__ == "__main__":
-    app = SpotifyApp()
+    app = CoverglubApp()
     app.run()
