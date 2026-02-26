@@ -1,0 +1,336 @@
+#!/usr/bin/env nix-shell
+#!nix-shell -i python3 -p python3 python3Packages.pygobject3 gobject-introspection gtk4 gdk-pixbuf playerctl gsettings-desktop-schemas
+"""
+coverglub — floating album art widget with hover controls
+A minimal, floating media player controller that displays album art and playback controls.
+Supports any MPRIS-compatible media player (Spotify, YouTube Music, VLC, etc.)
+
+Requires: python3-gi (GTK4), playerctl
+"""
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
+import subprocess
+import urllib.request
+import threading
+import math
+
+WINDOW_SIZES = [200, 350, 500]
+CORNER_RADIUS = 20
+CONTROL_ICON_SIZE = 30
+CONTROL_SPACING = 20
+OVERLAY_COLOR = (0, 0, 0, 0.75)
+POLL_INTERVAL_MS = 2000
+
+
+def run(cmd):
+    try:
+        return subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        return ""
+
+
+def playerctl(*args):
+    return run(["playerctl", "-p", "spotify", *args])
+
+
+class SpotifyRemote(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app)
+
+        self.set_title("spotify-remote")
+        self._size_index = 1  # Start at 350
+        self.set_default_size(WINDOW_SIZES[self._size_index], WINDOW_SIZES[self._size_index])
+        self.set_resizable(False)
+        self.set_decorated(False)
+        
+        # Exclude from alt+tab and taskbar
+        self.connect("realize", self._on_realize)
+
+        css = Gtk.CssProvider()
+        css.load_from_data(b"""
+            window { background: transparent; }
+            button {
+                background: transparent;
+                color: white;
+                border: none;
+                padding: 0;
+                min-width: 0;
+                min-height: 0;
+                opacity: 0.75;
+                transition: opacity 150ms ease-in-out;
+            }
+            button:hover {
+                opacity: 1.0;
+            }
+            .small-icon {
+                -gtk-icon-size: 24px;
+            }
+            .large-icon {
+                -gtk-icon-size: 36px;
+            }
+            .controls {
+                opacity: 0;
+                transition: opacity 200ms ease-in-out;
+            }
+            .controls.visible {
+                opacity: 1;
+            }
+            .dark-overlay {
+                background: rgba(0, 0, 0, 0.75);
+                opacity: 0;
+                transition: opacity 200ms ease-in-out;
+            }
+            .dark-overlay.visible {
+                opacity: 1;
+            }
+            .song-info {
+                padding: 12px 16px;
+            }
+            .track-name {
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            .artist-name {
+                color: rgba(255, 255, 255, 0.75);
+                font-size: 12px;
+            }
+        """)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), css,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        self._art_url = None
+        self._pixbuf = None
+        self._hovering = False
+        self._playing = False
+        self._drag_start = None
+
+        self._build_ui()
+        self._start_polling()
+
+    def _build_ui(self):
+        self.drawing_area = Gtk.DrawingArea()
+        self.drawing_area.set_hexpand(True)
+        self.drawing_area.set_vexpand(True)
+        self.drawing_area.set_draw_func(self._draw)
+
+        overlay = Gtk.Overlay()
+        overlay.set_child(self.drawing_area)
+
+        # Dark overlay that fades in on hover
+        dark_overlay = Gtk.Box()
+        dark_overlay.set_hexpand(True)
+        dark_overlay.set_vexpand(True)
+        dark_overlay.set_can_target(False)  # Don't intercept pointer events
+        dark_overlay.add_css_class("dark-overlay")
+        overlay.add_overlay(dark_overlay)
+        self.dark_overlay = dark_overlay
+
+        self.controls_overlay = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=CONTROL_SPACING)
+        self.controls_overlay.set_halign(Gtk.Align.CENTER)
+        self.controls_overlay.set_valign(Gtk.Align.CENTER)
+        self.controls_overlay.add_css_class("controls")
+        overlay.add_overlay(self.controls_overlay)
+
+        for icon, cb, css_class in [
+            ("media-skip-backward-symbolic", self._prev, "small-icon"),
+            ("media-playback-start-symbolic", self._play_pause, "large-icon"),
+            ("media-skip-forward-symbolic", self._next, "small-icon"),
+        ]:
+            btn = Gtk.Button()
+            btn.set_icon_name(icon)
+            btn.add_css_class("flat")
+            btn.add_css_class(css_class)
+            btn.connect("clicked", cb)
+            self.controls_overlay.append(btn)
+
+        self._play_btn = self.controls_overlay.get_first_child().get_next_sibling()
+
+        # Song info overlay with Revealer for slide animation
+        song_info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        song_info_box.add_css_class("song-info")
+        
+        self.track_label = Gtk.Label()
+        self.track_label.set_halign(Gtk.Align.CENTER)
+        self.track_label.set_ellipsize(3)  # ELLIPSIZE_END
+        self.track_label.add_css_class("track-name")
+        song_info_box.append(self.track_label)
+        
+        self.artist_label = Gtk.Label()
+        self.artist_label.set_halign(Gtk.Align.CENTER)
+        self.artist_label.set_ellipsize(3)  # ELLIPSIZE_END
+        self.artist_label.add_css_class("artist-name")
+        song_info_box.append(self.artist_label)
+        
+        # Wrap in revealer for slide animation
+        self.song_info_revealer = Gtk.Revealer()
+        self.song_info_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_UP)
+        self.song_info_revealer.set_transition_duration(250)
+        self.song_info_revealer.set_child(song_info_box)
+        self.song_info_revealer.set_halign(Gtk.Align.FILL)
+        self.song_info_revealer.set_valign(Gtk.Align.END)
+        self.song_info_revealer.set_reveal_child(False)
+        
+        overlay.add_overlay(self.song_info_revealer)
+
+        self.set_child(overlay)
+
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", self._on_enter)
+        motion.connect("leave", self._on_leave)
+        self.add_controller(motion)
+
+        drag = Gtk.GestureDrag()
+        drag.connect("drag-begin", self._drag_begin)
+        drag.connect("drag-update", self._drag_update)
+        self.drawing_area.add_controller(drag)
+
+        click = Gtk.GestureClick()
+        click.set_button(3)
+        click.connect("pressed", self._cycle_size)
+        self.drawing_area.add_controller(click)
+
+    def _on_realize(self, widget):
+        """Set window properties to exclude from taskbar/alt+tab"""
+        surface = self.get_surface()
+        if surface:
+            # Try multiple approaches for different compositors
+            try:
+                # GTK4 approach - skip taskbar
+                toplevel = self.get_native().get_surface()
+                if hasattr(toplevel, 'set_decorated'):
+                    # For Wayland compositors like Niri
+                    from gi.repository import GLib
+                    # Set app_id that Niri might recognize as utility
+                    if hasattr(surface, 'set_app_id'):
+                        surface.set_app_id('spotify-remote-widget')
+            except Exception:
+                pass
+            
+            # Also try type hint for X11/other WMs
+            try:
+                surface.set_type_hint(Gdk.SurfaceTypeHint.UTILITY)
+            except Exception:
+                pass
+
+    def _draw(self, area, cr, width, height):
+        r = CORNER_RADIUS
+        cr.new_sub_path()
+        cr.arc(r, r, r, math.pi, 3 * math.pi / 2)
+        cr.arc(width - r, r, r, -math.pi / 2, 0)
+        cr.arc(width - r, height - r, r, 0, math.pi / 2)
+        cr.arc(r, height - r, r, math.pi / 2, math.pi)
+        cr.close_path()
+        cr.clip()
+
+        if self._pixbuf:
+            scaled = self._pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
+            Gdk.cairo_set_source_pixbuf(cr, scaled, 0, 0)
+            cr.paint()
+        else:
+            cr.set_source_rgb(0.12, 0.12, 0.12)
+            cr.paint()
+
+    def _on_enter(self, *_):
+        self._hovering = True
+        self.dark_overlay.add_css_class("visible")
+        self.controls_overlay.add_css_class("visible")
+        self.song_info_revealer.set_reveal_child(True)
+
+    def _on_leave(self, *_):
+        self._hovering = False
+        self.dark_overlay.remove_css_class("visible")
+        self.controls_overlay.remove_css_class("visible")
+        self.song_info_revealer.set_reveal_child(False)
+
+    def _drag_begin(self, gesture, x, y):
+        self._drag_start = (x, y)
+
+    def _drag_update(self, gesture, dx, dy):
+        if self._drag_start:
+            try:
+                self.get_native().begin_move_drag(
+                    1,
+                    int(self._drag_start[0] + dx),
+                    int(self._drag_start[1] + dy),
+                    0
+                )
+            except Exception:
+                pass
+
+    def _cycle_size(self, *_):
+        # Cycle through window sizes
+        self._size_index = (self._size_index + 1) % len(WINDOW_SIZES)
+        new_size = WINDOW_SIZES[self._size_index]
+        self.set_default_size(new_size, new_size)
+        # Force resize by recreating the window surface
+        if self.get_surface():
+            self.get_surface().queue_render()
+
+    def _prev(self, *_): playerctl("previous")
+    def _next(self, *_): playerctl("next")
+
+    def _play_pause(self, *_):
+        playerctl("play-pause")
+        GLib.timeout_add(200, self._update)
+
+    def _fetch_art(self, url):
+        try:
+            with urllib.request.urlopen(url, timeout=5) as r:
+                data = r.read()
+            loader = GdkPixbuf.PixbufLoader()
+            loader.write(data)
+            loader.close()
+            pixbuf = loader.get_pixbuf()
+            GLib.idle_add(self._set_pixbuf, pixbuf)
+        except Exception:
+            pass
+
+    def _set_pixbuf(self, pixbuf):
+        self._pixbuf = pixbuf
+        self.drawing_area.queue_draw()
+
+    def _update(self):
+        status = playerctl("status")
+        self._playing = status == "Playing"
+        icon = "media-playback-pause-symbolic" if self._playing else "media-playback-start-symbolic"
+        if self._play_btn:
+            self._play_btn.set_icon_name(icon)
+
+        art_url = playerctl("metadata", "mpris:artUrl")
+        if art_url and art_url != self._art_url:
+            self._art_url = art_url
+            threading.Thread(target=self._fetch_art, args=(art_url,), daemon=True).start()
+
+        # Update song info
+        track = playerctl("metadata", "title")
+        artist = playerctl("metadata", "artist")
+        if track:
+            self.track_label.set_text(track)
+        if artist:
+            self.artist_label.set_text(artist)
+
+        return True
+
+    def _start_polling(self):
+        self._update()
+        GLib.timeout_add(POLL_INTERVAL_MS, self._update)
+
+
+class SpotifyApp(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="no.mads.spotify-remote")
+
+    def do_activate(self):
+        win = SpotifyRemote(self)
+        win.present()
+
+
+if __name__ == "__main__":
+    app = SpotifyApp()
+    app.run()
