@@ -74,20 +74,6 @@ OVERLAY_COLOR = (0, 0, 0, 0.75) # Dark overlay color (R, G, B, Alpha)
 POLL_INTERVAL_MS = 2000         # How often to check for song changes
 ```
 
-## Customizing for different players
-
-By default, the script targets Spotify. To use with other players, edit the `playerctl` function:
-
-```python
-# For YouTube Music:
-def playerctl(*args):
-    return run(["playerctl", "-p", "youtube-music", *args])
-
-# For any active player (auto-detect):
-def playerctl(*args):
-    return run(["playerctl", *args])
-```
-
 ## Known Issues
 
 - **Niri compositor**: The widget appears in alt+tab (Niri doesn't support window type hints for exclusion yet)
