@@ -2,8 +2,6 @@
 
 A minimal, floating album art widget for Linux that displays your currently playing music with elegant hover controls.
 
-![coverglub demo](https://via.placeholder.com/400x400?text=Demo+Screenshot)
-
 ## Features
 
 - 🎨 **Clean album art display** - Shows cover art from any MPRIS-compatible media player
