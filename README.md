@@ -8,10 +8,8 @@ A minimal, floating album art widget for Linux that displays your currently play
 
 - 🎨 **Clean album art display** - Shows cover art from any MPRIS-compatible media player
 - 🎮 **Hover controls** - Previous, play/pause, next buttons appear on hover with smooth animations
-- 🎵 **Song info overlay** - Track and artist info slides up from bottom on hover
 - 📐 **Resizable** - Right-click to cycle between 200px, 350px, and 500px sizes
 - 🪟 **Always floating** - Stays on top, perfect for tiling window managers
-- 🎭 **Fade animations** - Smooth opacity transitions for all UI elements
 - 🔄 **Works with any player** - Supports Spotify, YouTube Music, VLC, or any MPRIS-compatible player
 
 ## Requirements
@@ -98,7 +96,3 @@ def playerctl(*args):
 ## License
 
 MIT
-
-## Credits
-
-Built with love and interdimensional cable by [@slartibartmads](https://github.com/slartibartmads)
