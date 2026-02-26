@@ -109,6 +109,7 @@ class CoverglubWindow(Gtk.ApplicationWindow):
         self._hovering = False
         self._playing = False
         self._drag_start = None
+        self._controls_pinned = False  # Track if controls are pinned
 
         self._build_ui()
         self._start_polling()
@@ -195,6 +196,11 @@ class CoverglubWindow(Gtk.ApplicationWindow):
         click.connect("pressed", self._cycle_size)
         self.drawing_area.add_controller(click)
 
+        # Add keyboard controller for 'P' key to pin/unpin controls
+        key_controller = Gtk.EventControllerKey()
+        key_controller.connect("key-pressed", self._on_key_pressed)
+        self.add_controller(key_controller)
+
     def _on_realize(self, widget):
         """Set window properties to exclude from taskbar/alt+tab"""
         surface = self.get_surface()
@@ -238,15 +244,40 @@ class CoverglubWindow(Gtk.ApplicationWindow):
 
     def _on_enter(self, *_):
         self._hovering = True
+        self._show_controls()
+
+    def _on_leave(self, *_):
+        self._hovering = False
+        # Don't hide if pinned
+        if not self._controls_pinned:
+            self._hide_controls()
+
+    def _show_controls(self):
+        """Show controls and overlays"""
         self.dark_overlay.add_css_class("visible")
         self.controls_overlay.add_css_class("visible")
         self.song_info_revealer.set_reveal_child(True)
 
-    def _on_leave(self, *_):
-        self._hovering = False
+    def _hide_controls(self):
+        """Hide controls and overlays"""
         self.dark_overlay.remove_css_class("visible")
         self.controls_overlay.remove_css_class("visible")
         self.song_info_revealer.set_reveal_child(False)
+
+    def _on_key_pressed(self, controller, keyval, keycode, state):
+        """Handle keyboard input"""
+        # Check if 'P' key was pressed (both lowercase and uppercase)
+        if keyval == Gdk.KEY_p or keyval == Gdk.KEY_P:
+            self._controls_pinned = not self._controls_pinned
+            if self._controls_pinned:
+                # Show controls when pinning
+                self._show_controls()
+            else:
+                # Hide controls when unpinning if not hovering
+                if not self._hovering:
+                    self._hide_controls()
+            return True  # Event handled
+        return False  # Event not handled
 
     def _drag_begin(self, gesture, x, y):
         self._drag_start = (x, y)
