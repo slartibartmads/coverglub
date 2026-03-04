@@ -15,6 +15,7 @@ A minimal, floating album art widget for Linux that displays the album art of yo
 ## Requirements
 
 - Python 3
+- PyGObject (Python bindings for GTK)
 - GTK4
 - playerctl
 - A media player with MPRIS support (Spotify, YouTube Music, VLC, etc.)
