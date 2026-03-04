@@ -1,5 +1,4 @@
-#!/usr/bin/env nix-shell
-#!nix-shell -i python3 -p python3 python3Packages.pygobject3 gobject-introspection gtk4 gdk-pixbuf playerctl gsettings-desktop-schemas
+#!/usr/bin/env python3
 """
 coverglub — floating album art widget with hover controls
 A minimal, floating media player controller that displays album art and playback controls.
@@ -327,29 +326,37 @@ class CoverglubWindow(Gtk.ApplicationWindow):
         self.drawing_area.queue_draw()
 
     def _update(self):
+        # Batch all metadata queries into single playerctl call for better performance
         status = playerctl("status")
         self._playing = status == "Playing"
         icon = "media-playback-pause-symbolic" if self._playing else "media-playback-start-symbolic"
         if self._play_btn:
             self._play_btn.set_icon_name(icon)
 
-        art_url = playerctl("metadata", "mpris:artUrl")
-        if art_url and art_url != self._art_url:
-            self._art_url = art_url
-            threading.Thread(target=self._fetch_art, args=(art_url,), daemon=True).start()
-
-        # Update song info
-        track = playerctl("metadata", "title")
-        artist = playerctl("metadata", "artist")
-        if track:
-            self.track_label.set_text(track)
-        if artist:
-            self.artist_label.set_text(artist)
+        # Get all metadata in one call (much faster than multiple subprocess calls)
+        metadata_output = run(["playerctl", "metadata", "--format", 
+                               "{{mpris:artUrl}}\n{{title}}\n{{artist}}"])
+        
+        if metadata_output:
+            lines = metadata_output.split('\n')
+            art_url = lines[0] if len(lines) > 0 else ""
+            track = lines[1] if len(lines) > 1 else ""
+            artist = lines[2] if len(lines) > 2 else ""
+            
+            if art_url and art_url != self._art_url:
+                self._art_url = art_url
+                threading.Thread(target=self._fetch_art, args=(art_url,), daemon=True).start()
+            
+            if track:
+                self.track_label.set_text(track)
+            if artist:
+                self.artist_label.set_text(artist)
 
         return True
 
     def _start_polling(self):
-        self._update()
+        # Start initial update in background to avoid blocking window display
+        threading.Thread(target=self._update, daemon=True).start()
         GLib.timeout_add(POLL_INTERVAL_MS, self._update)
 
 
