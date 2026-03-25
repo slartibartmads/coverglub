@@ -13,11 +13,39 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
 import subprocess
 import urllib.request
+import urllib.parse
+import json
 import threading
 import math
+import os
+
+_SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+# Check both repo-relative (dev) and installed (share/coverglub/img) locations
+_DATA_DIRS = [
+    os.path.join(_SCRIPT_DIR, "img"),
+    os.path.join(_SCRIPT_DIR, "..", "share", "coverglub", "img"),
+]
+
+
+def _load_config():
+    config = {}
+    path = os.path.expanduser("~/.config/coverglub/config")
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    config[k.strip()] = v.strip()
+    except FileNotFoundError:
+        pass
+    return config
+
+
+_CONFIG = _load_config()
 
 WINDOW_SIZES = [200, 350, 500]
-CORNER_RADIUS = 20
+CORNER_RADIUS = int(_CONFIG.get("corner-radius", 20))
 CONTROL_ICON_SIZE = 30
 CONTROL_SPACING = 20
 OVERLAY_COLOR = (0, 0, 0, 0.75)
@@ -104,7 +132,9 @@ class CoverglubWindow(Gtk.ApplicationWindow):
         )
 
         self._art_url = None
-        self._pixbuf = None
+        self._itunes_cache = {}  # (artist, track) -> url or None
+        self._default_pixbuf = self._load_default_art()
+        self._pixbuf = self._default_pixbuf
         self._hovering = False
         self._playing = False
         self._drag_start = None
@@ -239,7 +269,7 @@ class CoverglubWindow(Gtk.ApplicationWindow):
             cr.paint()
         else:
             cr.set_source_rgb(0.12, 0.12, 0.12)
-            cr.paint()
+            cr.paint()  # Fallback if default.png failed to load
 
     def _on_enter(self, *_):
         self._hovering = True
@@ -309,6 +339,16 @@ class CoverglubWindow(Gtk.ApplicationWindow):
         playerctl("play-pause")
         GLib.timeout_add(200, self._update)
 
+    def _load_default_art(self):
+        for data_dir in _DATA_DIRS:
+            path = os.path.join(data_dir, "default.png")
+            if os.path.exists(path):
+                try:
+                    return GdkPixbuf.Pixbuf.new_from_file(path)
+                except Exception:
+                    pass
+        return None
+
     def _fetch_art(self, url):
         try:
             with urllib.request.urlopen(url, timeout=5) as r:
@@ -319,7 +359,27 @@ class CoverglubWindow(Gtk.ApplicationWindow):
             pixbuf = loader.get_pixbuf()
             GLib.idle_add(self._set_pixbuf, pixbuf)
         except Exception:
-            pass
+            GLib.idle_add(self._set_pixbuf, self._default_pixbuf)
+
+    def _fetch_art_itunes(self, artist, track):
+        key = (artist, track)
+        try:
+            term = urllib.parse.quote_plus(f"{artist} {track}")
+            url = f"https://itunes.apple.com/search?term={term}&entity=song&limit=1"
+            with urllib.request.urlopen(url, timeout=5) as r:
+                data = json.loads(r.read())
+            results = data.get("results", [])
+            art_url = results[0].get("artworkUrl100", "") if results else ""
+            if art_url:
+                art_url = art_url.replace("100x100bb", "600x600bb")
+            self._itunes_cache[key] = art_url or None
+            if art_url:
+                self._fetch_art(art_url)
+            else:
+                GLib.idle_add(self._set_pixbuf, self._default_pixbuf)
+        except Exception:
+            self._itunes_cache[key] = None
+            GLib.idle_add(self._set_pixbuf, self._default_pixbuf)
 
     def _set_pixbuf(self, pixbuf):
         self._pixbuf = pixbuf
@@ -333,10 +393,16 @@ class CoverglubWindow(Gtk.ApplicationWindow):
         if self._play_btn:
             self._play_btn.set_icon_name(icon)
 
-        # Get all metadata in one call (much faster than multiple subprocess calls)
-        metadata_output = run(["playerctl", "metadata", "--format", 
-                               "{{mpris:artUrl}}\n{{title}}\n{{artist}}"])
-        
+        # Get all metadata in one call — use subprocess directly to avoid strip()
+        # eating leading empty lines when artUrl is absent
+        try:
+            metadata_output = subprocess.check_output(
+                ["playerctl", "metadata", "--format", "{{mpris:artUrl}}\n{{title}}\n{{artist}}"],
+                stderr=subprocess.DEVNULL
+            ).decode()
+        except Exception:
+            metadata_output = ""
+
         if metadata_output:
             lines = metadata_output.split('\n')
             art_url = lines[0] if len(lines) > 0 else ""
@@ -346,6 +412,20 @@ class CoverglubWindow(Gtk.ApplicationWindow):
             if art_url and art_url != self._art_url:
                 self._art_url = art_url
                 threading.Thread(target=self._fetch_art, args=(art_url,), daemon=True).start()
+            elif not art_url and artist and track:
+                # No MPRIS art — try iTunes
+                self._art_url = None
+                key = (artist, track)
+                if key not in self._itunes_cache:
+                    self._itunes_cache[key] = None  # Mark in-flight
+                    threading.Thread(target=self._fetch_art_itunes, args=(artist, track), daemon=True).start()
+                elif self._itunes_cache[key]:
+                    # Already resolved, re-fetch if pixbuf was reset
+                    if self._pixbuf is self._default_pixbuf:
+                        threading.Thread(target=self._fetch_art, args=(self._itunes_cache[key],), daemon=True).start()
+            elif not art_url and self._art_url:
+                self._art_url = None
+                GLib.idle_add(self._set_pixbuf, self._default_pixbuf)
             
             if track:
                 self.track_label.set_text(track)
@@ -370,5 +450,20 @@ class CoverglubApp(Gtk.Application):
 
 
 if __name__ == "__main__":
+    import sys
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print("""coverglub — floating album art widget
+
+Usage: coverglub [--help]
+
+Config file: ~/.config/coverglub/config
+
+Options:
+  corner-radius=<int>   Corner rounding radius in pixels (default: 20)
+
+Example config:
+  corner-radius=50
+""")
+        sys.exit(0)
     app = CoverglubApp()
     app.run()

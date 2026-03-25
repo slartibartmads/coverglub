@@ -29,6 +29,7 @@
 
           installPhase = ''
             install -Dm755 coverglub $out/bin/coverglub
+            install -Dm644 img/default.png $out/share/coverglub/img/default.png
           '';
         };
       });
