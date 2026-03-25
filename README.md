@@ -24,9 +24,20 @@ A minimal, floating album art widget for Linux that displays the album art of yo
 
 Install dependencies for your distribution:
 
-**NixOS / Nix:**
+**Nix flake (recommended):**
+```bash
+# Run directly without installing
+nix run github:slartibartmads/coverglub
+
+# Or install into your profile
+nix profile install github:slartibartmads/coverglub
+
+# Development shell
+nix develop github:slartibartmads/coverglub
+```
+
+**NixOS (system packages):**
 ```nix
-# Add to configuration.nix (RECOMMENDED - fast startup)
 environment.systemPackages = with pkgs; [
   (python3.withPackages (ps: with ps; [
     pygobject3
@@ -34,12 +45,6 @@ environment.systemPackages = with pkgs; [
   gtk4
   playerctl
 ];
-```
-
-Alternative methods:
-```bash
-# Run with nix-shell (slower ~3s startup, but no installation needed)
-nix-shell -p python3 python3Packages.pygobject3 gtk4 playerctl --run ./coverglub
 ```
 
 **Arch Linux:**
